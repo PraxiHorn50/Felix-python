@@ -10,8 +10,7 @@ import struct
 from pylix_modules import pylix_dicts as fu
 from numba import njit, prange
 import math
-
-
+import matplotlib.pyplot as plt
 
 def read_inp_file(filename):
     """
@@ -89,6 +88,9 @@ def read_hkl_file(filename):
 
     # Convert lists to numpy arrays
     input_hkls = np.array(input_hkls, dtype=int)
+    # remove [0,0,0] if it is present
+    mask = ~np.all(input_hkls == 0, axis=1)
+    input_hkls = input_hkls[mask]
     i_obs = np.array(i_obs) if cRED else None
     sigma_obs = np.array(sigma_obs) if cRED else None
 
@@ -99,10 +101,7 @@ def extract_cif_parameter(item):
     """
     Parses a value string with uncertainty, e.g., '8.6754(3)',
     and returns the value and uncertainty as floats.
-
-    Args:
     - item (str): The string containing the value with uncertainty.
-
     Returns:
     - tuple: A tuple containing the value and the uncertainty as floats.
     """
@@ -169,6 +168,7 @@ def read_cif(filename):
         "_cell_angle_beta",
         "_cell_angle_gamma",
         "_cell_volume",
+        "_atom_type_oxidation_number",
         "_atom_site_fract_x",
         "_atom_site_fract_y",
         "_atom_site_fract_z",
@@ -191,6 +191,7 @@ def read_cif(filename):
         "_chemical_formula_sum",
         "_symmetry_equiv_pos_as_xyz",
         "_space_group_symop_operation_xyz",
+        "_atom_type_symbol",
         "_atom_site_wyckoff_symbol",
         "_atom_site_label",
         "_atom_site_type_symbol",
@@ -289,9 +290,11 @@ def symop_convert(symop_xyz):
     return mat, vec
 
 
-def unique_atom_positions(symmetry_matrix, symmetry_vector, basis_atom_label,basis_atom_type_label,
-                          basis_atom_name, basis_atom_position, basis_B_iso,
-                          basis_occupancy, basis_aniso_matrix,basis_pv,basis_kappa):
+def unique_atom_positions(symmetry_matrix, symmetry_vector, basis_atom_label,
+                          basis_atom_type_label, basis_atom_name,
+                          basis_atom_position, basis_u_ij,
+                          basis_occupancy, basis_pv,
+                          basis_kappa, debug=False):
     """
     Fills the unit cell by applying symmetry operations to the basis
 
@@ -301,61 +304,64 @@ def unique_atom_positions(symmetry_matrix, symmetry_vector, basis_atom_label,bas
     basis_atom_label (str): a label for each basis atom
     basis_atom_name (str): element symbol for each basis atom
     basis_atom_position float(n_basis_atoms x 3): fractional coordinates
-    basis_B_iso float(n_basis_atoms): Debye-Waller factors for each basis atom
+    basis_u_ij float(n_basis_atoms, 3, 3): anisotropic displacement parameter tensor for each basis atom
     basis_occupancy float(n_basis_atoms): occupancy for each basis atom
 
     Returns:
     atom_position, atom_label, atom_name, B_iso, occupancy
     """
-
     # tolerance in fractional coordinates to consider atoms to be the same
-    tol = 0.001
+    tol = 0.000001
     # Determine the size of the all_atom_position array
     n_symmetry_operations = symmetry_vector.shape[0]
     n_basis_atoms = basis_atom_position.shape[0]
     total_atoms = n_symmetry_operations * n_basis_atoms
+    if debug:
+        np.set_printoptions(precision=5, suppress=True)
+        for i in range(n_basis_atoms):
+            print(f"Basis anisotropic u_ij [{i}]")
+            print(f"{basis_u_ij[i, :5, :5]}")
+
 
     # Initialize arrays to store all atom positions, including duplicates
     all_atom_label = np.tile(basis_atom_label, n_symmetry_operations)
-    #print (basis_atom_type_label)
-    
-    all_atom_type_label = np.tile(basis_atom_type_label, n_symmetry_operations)
-   
-    
-    all_atom_name = np.tile(basis_atom_name, n_symmetry_operations)
-    #print(all_atom_name)
-    all_occupancy = np.tile(basis_occupancy, n_symmetry_operations)
-    all_B_iso = np.tile(basis_B_iso, n_symmetry_operations)
-    all_Kappa =np.tile(basis_kappa, n_symmetry_operations)
-    all_Pv = np.tile(basis_pv, n_symmetry_operations)
+    # print (basis_atom_type_label)
 
-    # # Generate all equivalent positions by applying symmetry
+    all_atom_type_label = np.tile(basis_atom_type_label, n_symmetry_operations)
+
+    all_atom_name = np.tile(basis_atom_name, n_symmetry_operations)
+    # print(all_atom_name)
+    all_occupancy = np.tile(basis_occupancy, n_symmetry_operations)
+    all_kappa = np.tile(basis_kappa, n_symmetry_operations)
+    all_pv = np.tile(basis_pv, n_symmetry_operations)
+
+    # Generate all equivalent positions by applying symmetry
     symmetry_applied = \
         np.einsum('ijk,lk->ilj', symmetry_matrix, basis_atom_position) +\
         symmetry_vector[:, np.newaxis, :]
     all_atom_position = symmetry_applied.reshape(total_atoms, 3)
 
+    # Anisotropic Displacement Parameters, ADPs
+    # apply symops to u_ij's, size [n_symmetry_operations, n_basis_atoms, 3, 3]
+    tmp = np.matmul(symmetry_matrix[:, None], basis_u_ij[None, :])
+    # array of inverse operations, size [n_symmetry_operations, 3, 3]
+    # NB we can't use the transpose as symops are not always orthonormal
+    Minv = np.linalg.inv(symmetry_matrix)
+    # finsh the calculation, size [n_symmetry_operations, n_basis_atoms, 3, 3]
+    all_u_ij = np.matmul(tmp, Minv[:, None])
+    # reshape, size [n_symmetry_operations*n_basis_atoms, 3, 3]
+    all_u_ij = all_u_ij.reshape(-1, 3, 3)
+
     # Normalize positions to be within [0, 1]
     all_atom_position %= 1.0
     # make small values precisely zero
     all_atom_position[np.abs(all_atom_position) < tol] = 0.0
-    
-    all_aniso_matrix = np.zeros((total_atoms, 3, 3))
-    
-    for s, R in enumerate(symmetry_matrix):
-        for a in range(n_basis_atoms):
-            idx = s * n_basis_atoms + a
-            U = basis_aniso_matrix[a]
-            all_aniso_matrix[idx] = R @ U @ R.T
-         
-    #all_aniso_matrix = np.einsum('sij,ajk,skl->s a i l', symmetry_matrix, basis_aniso_matrix, symmetry_matrix)
-    #all_aniso_matrix = all_aniso_matrix.reshape(n_symmetry_operations * n_basis_atoms, 3, 3)
-    
+
     # Reduce to the set of unique fractional atomic positions using tol
     dist_matrix = np.linalg.norm(all_atom_position[:, np.newaxis, :] -
                                  all_atom_position[np.newaxis, :, :], axis=-1)
     unique_mask = np.ones(len(all_atom_position), dtype=bool)
-    i = []  # indices of unique atom positiona
+    i = []  # indices of unique atom positions
     for j in range(total_atoms):
         if unique_mask[j]:  # If this point is still unique
             i.append(j)
@@ -368,26 +374,21 @@ def unique_atom_positions(symmetry_matrix, symmetry_vector, basis_atom_label,bas
     atom_type = all_atom_type_label[i]
     atom_name = all_atom_name[i]
     occupancy = all_occupancy[i]
-    B_iso = all_B_iso[i]
-    Kappa = all_Kappa[i]
-    Pv = all_Pv[i]
-    
-    if all_aniso_matrix is not None:
-        aniso_matrix = all_aniso_matrix[i]
-    else:
-        aniso_matrix = None
-    
-    
+    u_ij = all_u_ij[i]
+    kappa = all_kappa[i]
+    pv = all_pv[i]
+    #print(u_ij)
+    if debug:
+        np.set_printoptions(precision=5, suppress=True)
+        for i in range(3):
+            print(f"Anisotropic u_ij [{i}]")
+            print(f"{u_ij[i, :5, :5]}")
+
+    return atom_position, atom_label,atom_type, atom_name, u_ij, occupancy, pv, kappa
 
 
-    return atom_position, atom_label,atom_type, atom_name, B_iso, occupancy, aniso_matrix, Pv,Kappa
-
-
-    
-
-
-def reference_frames(debug, cell_a, cell_b, cell_c, cell_alpha, cell_beta,
-                     cell_gamma, space_group, x_dir_c, z_dir_c, norm_dir_c):
+def reference_frames(cell_a, cell_b, cell_c, cell_alpha, cell_beta, cell_gamma,
+                     space_group, x_dir_c, z_dir_c, norm_dir_c, debug):
     """
     Produces reciprocal lattice vectors and related parameters
 
@@ -488,24 +489,38 @@ def reference_frames(debug, cell_a, cell_b, cell_c, cell_alpha, cell_beta,
     # Output to check
     if debug:
         print(" ")
-        np.set_printoptions(precision=3, suppress=True)
+        np.set_printoptions(precision=5, suppress=True)
         print(f"a = {cell_a}, b = {cell_b}, c = {cell_c}")
-        print(f"alpha = {cell_alpha*180.0/np.pi}, beta = {cell_beta*180.0/np.pi}, gamma = {cell_gamma*180.0/np.pi}")
+        print(f"alpha = {cell_alpha*180.0/np.pi:.2f}, beta = {cell_beta*180.0/np.pi:.2f}, gamma = {cell_gamma*180.0/np.pi:.2f}")
         print(f"X = {x_dir_c} (reciprocal space)")
         print(f"Z = {z_dir_c} (direct space)")
         print(" ")
         print("Transformation crystal to orthogonal (O) frame:")
         print(t_mat_c2o)
         print(t_mat_cr2or)
-        print(f"O frame: a = {a_vec_o}, b = {b_vec_o}, c = {c_vec_o}")
-        print(f"a* = {ar_vec_o}, b* = {br_vec_o}, c* = {cr_vec_o}")
-        print(f"X = {x_dir_o}, y = {y_dir_o}, Z = {z_dir_o}")
+        print("O frame:")
+        print(f" a = {a_vec_o}")
+        print(f" b = {b_vec_o}")
+        print(f" c = {c_vec_o}")
+        print(f" a* = {ar_vec_o}")
+        print(f" b* = {br_vec_o}")
+        print(f" c* = {cr_vec_o}")
+        print(" ")
+        print(f" X = {x_dir_o}")
+        print(f" Y = {y_dir_o}")
+        print(f" Z = {z_dir_o}")
         print(" ")
         print("Transformation orthogonal to microscope frame:")
         print(t_mat_o2m)
-        print(f"Microscope frame: a = {a_vec_m}, b = {b_vec_m}, c = {c_vec_m}")
+        print("Microscope frame:")
+        print(f" a = {a_vec_m}")
+        print(f" b = {b_vec_m}")
+        print(f" c = {c_vec_m}")
+        print(f" a* = {ar_vec_m}")
+        print(f" b* = {br_vec_m}")
+        print(f" c* = {cr_vec_m}")
         print(f"Specimen surface normal = {norm_dir_m}")
-        print(f"a* = {ar_vec_m}, b* = {br_vec_m}, c* = {c_vec_m}")
+
     return a_vec_m, b_vec_m, c_vec_m, ar_vec_m, br_vec_m, cr_vec_m, norm_dir_m, t_mat_o2m, t_mat_c2o
 
 
@@ -1082,9 +1097,9 @@ def hkl_make(ar_vec_m, br_vec_m, cr_vec_m, big_k, lattice_type,
     return hkl, g_pool, g_mag, np.array(g_output)
 
 
-def Fg_matrix(n_hkl, scatter_factor_method, n_atoms, atom_coordinate,
-              atomic_number, occupancy, B_iso, g_matrix, g_magnitude,
-              absorption_method, absorption_per, electron_velocity, g_pool, aniso_matrix,kappas,pv,Debye,model):
+def Fg_matrix(n_hkl, scatter_factor_method,basis_atom_label,atom_label, n_atoms, atom_coordinate,
+              atomic_number, occupancy, g_matrix, g_magnitude,
+              absorption_method, absorption_per, electron_velocity, g_pool, u_ij,kappas,pv,Debye,model):
     Fg_matrix = np.zeros([n_hkl, n_hkl], dtype=np.complex128)
     # calculate g.r for all g-vectors and atom posns [n_hkl, n_hkl, n_atoms]
     g_dot_r = np.einsum('ijk,lk->ijl', g_matrix, atom_coordinate)
@@ -1094,14 +1109,15 @@ def Fg_matrix(n_hkl, scatter_factor_method, n_atoms, atom_coordinate,
     
     # new refined list of variables per atom in unit cell 
     
-   
+
+    
 
     # NB scattering factor methods accept and return 2D[n_hkl, n_hkl] array of
     # g magnitudes but only one atom type. (Potential speed up by broadcasting
     # all atom types and modifying scattering factor methods to accept 2D + 1D
     # arrays [n_hkl, n_hkl] & [n_atoms],
     # returning an array [n_hkl, n_hkl, n_atoms])
-   
+    '''
     
     for i in range(n_atoms):
         # get the scattering factor
@@ -1116,47 +1132,103 @@ def Fg_matrix(n_hkl, scatter_factor_method, n_atoms, atom_coordinate,
         elif scatter_factor_method == 4:
             
             print("Calculating scattering factors for atom", i+1, "/", n_atoms)
+
             f_g = kappa_factors(g_magnitude,atomic_number[i],pv[i],kappas[i])
+            
         else: 
             raise ValueError("No scattering factors chosen in felix.inp")
+            
+            
+    '''
+    print("g_shape:",g_magnitude.shape)
+    f_g = np.zeros(
+    (len(basis_atom_label),) + g_magnitude.shape,
+    dtype=np.complex128)
+    '''
+    
+    kappa = 1.2
+    Q = np.linspace(0, 10, 10000)
+    
+    f_kirklandtest = f_kirkland(atomic_number[1], Q).ravel()
+   
+    # Generate kappa factors and flatten
+    f_g = kappa_factors(Q, atomic_number[1], pv[1], kappa).ravel()
+    g_flat = g_magnitude.ravel()
+    
+    # Plot
+    plt.figure(figsize=(7,5))
+    plt.plot(Q, f_g, label=f'Atom Z={atomic_number[1]}, κ={kappa}')
+    plt.plot(Q, f_kirklandtest, label='Kirkland (relativistic)', linestyle='--', color='black')
+    plt.xlabel('g magnitude (1/bohr)')
+    plt.ylabel('Electron scattering factor f_g')
+    plt.title(f'κ={kappa} Kappa factors vs g magnitude')
+    plt.legend(frameon=False)
+    plt.show()
+    '''
 
+    for i in range(len(basis_atom_label)):
+        if scatter_factor_method == 0:
+            f_g[i] = f_kirkland(atomic_number[i], g_magnitude)
+        elif scatter_factor_method == 1:
+            f_g[i] = f_lobato(atomic_number[i], g_magnitude)
+        elif scatter_factor_method == 2:
+            f_g[i] = f_peng(atomic_number[i], g_magnitude)
+        elif scatter_factor_method == 3:
+            f_g[i] = f_doyle_turner(atomic_number[i], g_magnitude)
+        elif scatter_factor_method == 4:
+            print(f"Calculating scattering factors for atom {i+1}/{len(basis_atom_label)}")
+            f_g[i] = kappa_factors(
+                g_magnitude, atomic_number[i], pv[i], kappas[i]
+            )
+        else:
+            raise ValueError("No scattering factors chosen in felix.inp")
+
+    sf_map = dict(zip(basis_atom_label, f_g))
+    unit_cell_fg = np.array([sf_map[l] for l in atom_label])
+    
+    
+    
+    for i in range(len(unit_cell_fg)):
+        
         # get the absorptive scattering factor (null for absorption_method==0)
         # no absorption
         if absorption_method == 0:
-            f_g_prime = np.zeros_like(f_g)
+            f_g_prime = np.zeros_like(unit_cell_fg[i])
+           
         # proportional model
         elif absorption_method == 1:
-            f_g_prime = 1j * f_g * absorption_per/100.0
+            f_g_prime = 1j * unit_cell_fg[i] * absorption_per/100.0
         # Bird & King model, parameterised by Thomas (Acta Cryst 2023)
+        '''
         elif absorption_method == 2:
             f_g_prime = 1j * f_thomas(g_magnitude, B_iso[i],
                                       atomic_number[i], electron_velocity)
-    
+    '''
         # The Structure Factor Equation
         # multiply by Debye-Waller factor, phase and occupancy
         if (Debye ==1):
             # Anisotropic structure factor
-            gUg = np.einsum('ajk,ij,ik->ai', aniso_matrix, g_pool, g_pool)
+            gUg = np.einsum('ajk,ij,ik->ai', u_ij, g_pool, g_pool)
             T_factor = np.exp(- 0.5 * gUg )
-            Fg_matrix = Fg_matrix+((f_g + f_g_prime) *
+            Fg_matrix = Fg_matrix+((unit_cell_fg[i] + f_g_prime) *
                       phase[:, :, i] *
                       occupancy[i] *
                       T_factor[i, :][:, np.newaxis])
         elif (Debye ==0):
             #Isotropic structure factor
-            Fg_matrix = Fg_matrix+((f_g + f_g_prime) * phase[:, :, i] *
-                                   occupancy[i] *
-                                   np.exp(-B_iso[i] *
-                                         (g_magnitude**2)/(16*np.pi**2)))
+            gUg = np.einsum('ajk,ij,ik->ai', u_ij, g_pool, g_pool)
+            T_factor = np.exp(- 0.5 * gUg )
+            Fg_matrix = Fg_matrix+((unit_cell_fg[i] + f_g_prime) *
+                      phase[:, :, i] *
+                      occupancy[i] *
+                      T_factor[i, :][:, np.newaxis])
+    
         
             
             
       
         
-      
-
-   
-
+    
     # *** Budhika Mendis's 'cluster' method ***
     # make a mask to exclude g-vectors above a given magnitude
     # mask = (g_magnitude < 1*np.pi)
@@ -1392,29 +1464,7 @@ def weak_beams(s_g_pix, ug_matrix, ug_sg_matrix, strong_beam_list,
     ug_sg_matrix[1:n_beams, 0] -= sum_c  # Update first column (sumC)
     ug_sg_matrix[1:n_beams, 1:n_beams] -= (2.0 * big_k_mag *
                                            sum_d[:, None]) / (4.0 * np.pi**2)
-    # old version using loops
-    # for j in range(1, n_beams):
-    #     sum_c = 0 + 0j  # Complex zero
-    #     sum_d = 0 + 0j  # Complex zero
 
-    #     for i in range(n_weak_beams):
-    #         # Eq. 4 from Zuo & Weickenmeier (Ultramicroscopy 57, 1995)
-    #         sum_c += (ug_matrix[strong_beam_list[j], weak[i]] *
-    #                   ug_matrix[weak[i], 0] /
-    #                   (2.0 * big_k_mag * s_g_pix[weak_beam_list[i]]))
-
-    #         # Eq. 5 from Zuo & Weickenmeier (Ultramicroscopy 57, 1995)
-    #         sum_d += (ug_matrix[strong_beam_list[j], weak_beam_list[i]] *
-    #                   ug_matrix[weak_beam_list[i], strong_beam_list[j]] /
-    #                   (2.0 * big_k_mag * s_g_pix[weak[i]]))
-
-    #     # Update the first column of the ug_sg_matrix
-    #     mask = ug_sg_matrix == ug_sg_matrix[j, 0]
-    #     ug_sg_matrix[mask] = ug_sg_matrix[j, 0] - sum_c
-
-    #     # Update the diagonal elements (Sg's)
-    #     ug_sg_matrix[j, j] = ug_sg_matrix[j, j] - \
-    #         2.0*big_k_mag*sum_d/(4.0*np.pi**2)
     return
 
 
@@ -1443,10 +1493,7 @@ def f_kirkland(z, g_magnitude):
     f_g =   np.sum(a/(q**2+b), axis=0) + np.sum(c*np.exp(-(d*q**2)), axis=0)
     return f_g
 
-# calc scattering factors for core density and valence density seperately 
-
-
-
+# calc scattering factors for core density and valence density seperately
 
 
 def f_doyle_turner(z, g_magnitude):
@@ -1534,7 +1581,8 @@ def calc_slater_orbitals(z, orbital,r):
     
     C= np.array(fu.slater_coefficients[z][orbital]['coeff'])
     
-    n = int(orbital[0])
+    njl = np.array(fu.slater_coefficients[z][orbital]['n'])
+    
     
     # for now we just state 1s contriutes to the core and 2s contributes to valence with a respective electron occupation of 2,1
   
@@ -1550,13 +1598,13 @@ def calc_slater_orbitals(z, orbital,r):
     # then compare with kirkland to check agreement and upscale
     
     
-    for cj,zj in zip(C,delta):
-        Nj = ((2*zj)**(n+0.5))/(np.sqrt(math.factorial(2*n)))
-        S_j = Nj*r**(n-1)*np.exp(-zj*r)          # each electron is defined by a primitive slater orbital of this form 
+    for cj,zj,nj in zip(C,delta,njl):
+        Nj = ((2*zj)**(nj+0.5))/(np.sqrt(math.factorial(2*nj)))
+        S_j = Nj*r**(nj-1)*np.exp(-zj*r)          # each electron is defined by a primitive slater orbital of this form 
         R_total += cj*S_j
         
     
-    return R_total      # now return the radial function for our atom use this function and integrate it to get form factor
+    return R_total       # now return the radial function for our atom use this function and integrate it to get form factor
     
 
 """
@@ -1630,7 +1678,7 @@ def xray_form_factor_valence(r, rho, S, pv, k):
     rho = np.asarray(rho, dtype=np.float64)
     S = np.asarray(S, dtype=np.float64)
 
-    scale = pv * (k**3)
+    scale = pv # removed kappa**3
     return _form_factor_kernel(r, rho, S, scale)
 
 def xray_form_factor_core(r, rho, S, pc):
@@ -1676,7 +1724,7 @@ def precompute_densities(Z,kappa,pv):
     
     for orbital in valence_orbitals:
         
-        R= calc_slater_orbitals(Z,orbital,r*kappa)
+        R= (kappa**(3/2))*calc_slater_orbitals(Z,orbital,r*kappa)
         
        
         
@@ -1696,7 +1744,7 @@ def precompute_densities(Z,kappa,pv):
    #valence_density = (1/(4*np.pi))*(R_valence**2)# wavefucniton = R(r)Y_l^m(theta,phi)
     
     pc = fu.elements_info[Z]['pc']
-    density_total = pc*core_density_n+ pv*kappa**3*valence_density_n #p_atom(r) in kappa formalism 
+    density_total = pc*core_density_n+ pv*valence_density_n #p_atom(r) in kappa formalism 
     
     integrand = density_total*np.pi*r**2
     r2_expect = np.trapz(r**2*integrand, x=r)/np.trapz(integrand,x=r)   #mean square radius of electrons in the atom
@@ -1782,65 +1830,82 @@ def kappa_factors(g, Z, pv, kappa):
     return f_out.reshape(orig_shape)
     
     
-   
-        
-   
-    #return calc_scattering_amplitudes(q, Z, pv, kappa)
-
-#should handle values below 0.5 Q using kirkland values or some type of extrapolation
 
 
 
-
-
-
-def four_gauss(x, args):
-    # returns the sum of four Gaussians & a constant for Thomas f_prime
-    f = args[0]*np.exp(-abs(args[1])*x**2) + \
-        args[2]*np.exp(-abs(args[3])*x**2) + \
-        args[4]*np.exp(-abs(args[5])*x**2) + \
-        args[6]*np.exp(-abs(args[7])*x**2) + args[8]
+def four_gauss(s, a):
+    """
+    sum of four Gaussians & a constant for Thomas f_prime
+    s : float, sin(theta)/lambda, can be an array [n_hkl, n_hkl]
+    a : array of floats size [9] from Thomas look up table
+    Returns : f_prime, array [n_hkl, n_hkl], the imaginary part of the
+    scattering factor
+    """
+    f = (a[..., 0] * np.exp(-np.abs(a[..., 1]) * s**2) +
+         a[..., 2] * np.exp(-np.abs(a[..., 3]) * s**2) +
+         a[..., 4] * np.exp(-np.abs(a[..., 5]) * s**2) +
+         a[..., 6] * np.exp(-np.abs(a[..., 7]) * s**2) +
+         a[..., 8])
     return f
+
+    # f = (a[..., 0]*np.exp(-abs(a[..., 1])*s[..., 0]**2) +
+    #     a[..., 2]*np.exp(-abs(a[..., 3])*s[..., 1]**2) +
+    #     a[..., 4]*np.exp(-abs(a[..., 5])*s[..., 2]**2) +
 
 
 def f_thomas(g, B, Z, v):
-    # interpolated of parameterised Bird & King absorptive scattering factors
-    # calculation uses s = g/2
+    """
+    Interpolated parameterised Bird & King absorptive scattering factors
+    we collect 9 parameters from the table fu.thomas according to atomic
+    number Z, and use the subroutine four_gauss to produce f_prime.
+    Relativistic correction scales by v/c.
+
+    g : float, g-vector magnitude |g|, usually an array [n_hkl, n_hkl]
+    B : float, Biso (an array [n_hkl, n_hkl] if using anisotropic ADPs)
+    Z : integer, atomic number
+    v : float, electron velocity in m/s
+
+    Returns : f_prime, array [n_hkl, n_hkl], the imaginary part of the
+    scattering factor
+    """
+
+    # calculation uses s = g/2 = sin(theta)/lambda
     s = g/2
     # returns an interpolated absorptive scattering factor
     Bvalues = np.array([0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5,
                         0.7, 1, 1.5, 2, 2.75, 4])
 
     # error checking
-    if isinstance(s, np.ndarray) and np.any(s < 0):
-        raise Exception("inavlid values of s")
-    elif isinstance(s, (int, float)) and s < 0:
-        raise Exception("invalid value of s")
-    if B < 0:
-        raise Exception("invalid value of B")
-    if B < 0.1:
-        B = 0.1
-    if B > 4:  # or 0 < B < 0.1:
-        raise Exception(f"B = {B}! Outside range of parameterisation")
+    if np.any(s < 0):
+        raise ValueError("Absorptive f: invalid g (must be ≥ 0)")
+    if np.any(B < 0) or np.any(B > 4):
+        # print("Absorptive f: Biso outside range [0, 4], clipping")
+        B = np.clip(B, 0., 4.)
     if Z < 1 or Z > 103:
-        raise Exception("invalid value of Z")
-    if isinstance(s, np.ndarray) and B == 0:
-        return np.zeros(np.shape(s))
-    elif isinstance(s, (int, float)) and B == 0:
-        return 0
+        raise ValueError("Absorptive f: invalid Z")
+    # If all B are zero: return zero map
+    if np.all(B == 0):
+        return np.zeros(B.shape)
 
-    # get f_prime
-    if np.any(B == Bvalues):  # we don't need to interpolate
-        i = np.where(Bvalues == B)[0][0]
-        line = four_gauss(s, fu.thomas[Z-1][i])
-    else:  # interpolate between parameterised values
-        i = np.where(Bvalues >= B)[0][0]
-        bounding_b = Bvalues[i - 1:i + 1]
-        line1 = four_gauss(s, fu.thomas[Z-1][i - 1])
-        line2 = four_gauss(s, fu.thomas[Z-1][i])
-        line = line1 + (B - bounding_b[0])*(line2 - line1) / \
-            (bounding_b[1] - bounding_b[0])
-    f_prime = c*np.where(line > 0, line, 0)/v
+    # index in Bvalues just above B
+    idx = np.searchsorted(Bvalues, B, side='left')
+
+    # upper and lower f_prime
+    params_hi = fu.thomas[Z - 1][idx]     # size [n_hkl, n_hkl, 9]
+    f_hi = four_gauss(s, params_hi)
+    params_lo = fu.thomas[Z - 1][idx-1]     # size [n_hkl, n_hkl, 9]
+    params_lo[idx == 0] = 0
+    f_lo = four_gauss(s, params_lo)
+
+    # interpolation
+    B_hi = Bvalues[idx]
+    B_lo = Bvalues[idx-1]
+    B_lo[idx == 0] = 0
+    interp = (B_hi-B)/(B_hi-B_lo)
+    f_p = (f_lo*interp) + (f_hi*(1-interp))
+
+    # replace negative values with zero and relativistic correction
+    f_prime = np.where(f_p > 0, f_p, 0)*c/v
 
     return f_prime
 
@@ -2021,8 +2086,8 @@ def parabo3(x, y):
         x_v = -b/(2*a)  # x-coord
         y_v = c-b*b/(4*a)  # y-coord
     else:
-        x_v = x[1]
-        y_v = y[1]
+        x_v = x[np.argmin(y)]
+        y_v = y[np.argmin(y)]
 
     return x_v, y_v
 
@@ -2058,7 +2123,7 @@ def convex(r3_x, r3_y):
         # point twice, exp(0.75)~=2.12
         next_x = r3_x[y_min] + np.exp(0.75) * last_dx
         minny = False
-        print("Convex, will contine")  # going to {next_x:.2f}")
+        print(f"Convex, will contine to {next_x:.5f}")
     else:
         next_x, next_y = parabo3(r3_x, r3_y)
         print(f"Concave, predict minimum at {next_x:.4f} with fit index {100*next_y:.2f}%")

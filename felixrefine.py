@@ -25,8 +25,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patheffects import withStroke
 import time
+import imageio
 
-# felix modules
+# felix module
 from pylix_modules import pylix as px
 from pylix_modules import simulate as sim
 from pylix_modules import pylix_dicts as fu
@@ -133,46 +134,31 @@ v.basis_atom_position = \
                      np.array([tup[0] for tup in v.atom_site_fract_z])))
 
 
+'''
+#kappa refined
+v.basis_atom_position[1][2]  = 0.998    #updating Nb z with refined
+v.basis_atom_position[2] = [0.3837, 0.3811, 0.2287]#
+v.basis_atom_position[0][2] = 0.2833
+
+'''
+
+
+#kirkland refined
+
+
+
+
+v.basis_atom_position[1][2]  = 0.9994    #updating Nb z with refined
+v.basis_atom_position[2] = [0.3972, 0.3783, 0.2289]#O
+v.basis_atom_position[0][2] = 0.2917   #li
+
+
+
 
 # Debye-Waller factor
-if "atom_site_b_iso_or_equiv" in cif_dict:
-    v.basis_B_iso = np.array([tup[0] for tup in v.atom_site_b_iso_or_equiv])
-elif "atom_site_u_iso_or_equiv" in cif_dict:
-    v.basis_B_iso = np.array([tup[0] for tup in
-                              v.atom_site_u_iso_or_equiv]) * 8 * np.pi**2
-   
-v.aniso_matrix = np.zeros((n_basis, 3, 3)) 
-
-v.basis_U_iso = np.array([tup[0] for tup in
-                          v.atom_site_u_iso_or_equiv])
-
-v.aniso_matrix[2] = np.diag([v.basis_U_iso[0],v.basis_U_iso[0],v.basis_U_iso[0]])
-
-# Anisotropic Debye-Waller factor
-if v.atom_site_aniso_u_11 is not None:
-    v.aniso_U11 = np.array([tup[0] for tup in v.atom_site_aniso_u_11])
-
-    v.aniso_U22 = np.array([tup[0] for tup in v.atom_site_aniso_u_22])
-
-    v.aniso_U33 = np.array([tup[0] for tup in v.atom_site_aniso_u_33])
-
-    v.aniso_U12 = np.array([tup[0] for tup in v.atom_site_aniso_u_12])
-
-    v.aniso_U13 = np.array([tup[0] for tup in v.atom_site_aniso_u_13])
-
-    v.aniso_U23 = np.array([tup[0] for tup in v.atom_site_aniso_u_23])
-
-    
-    
-    for i in range(len(v.aniso_U11)):
-        v.aniso_matrix[i] = \
-            np.column_stack((np.array([v.aniso_U11[i], v.aniso_U12[i], v.aniso_U13[i]]),
-                             np.array([v.aniso_U12[i], v.aniso_U22[i], v.aniso_U23[i]]),
-                             np.array([v.aniso_U13[i], v.aniso_U23[i], v.aniso_U33[i]])))
-
-
-
-
+# -----------------------------
+# Debye–Waller: isotropic value
+# -----------------------------
 
 
 
@@ -231,23 +217,38 @@ for i in range(len(atomic_number)):
     v.Basis_Kappa[i] = 1.0  #set all kappa values to 1 initially 
 
 #setting up initial pv values 
+
+
+
 print(v.Basis_Kappa)
 
 '''
-v.Basis_Pv[0]= 0.9994
-v.Basis_Pv[1] = 4.997
-v.Basis_Pv[2]= 5.985
-v.Basis_Kappa[0]= 1.3
-v.Basis_Kappa[1]= 1.01
-v.Basis_Kappa[2]= 1.01
-
+#setting some initial values to match kirkland these act as our baseline
+v.Basis_Kappa[0] = 1.0
+v.Basis_Kappa[1] = 1.2
+v.Basis_Kappa[2] = 0.98
 '''
 
 
+
+ #refined kappas
 # kappas (default 1.0)
 
+v.Basis_Kappa[0] = 1.0
+v.Basis_Kappa[1] = 1.25
+v.Basis_Kappa[2] = 0.98
 
-#refined kappa : [1.21517673 1.12267508 0.93547286]
+#refined kappa values
+
+
+#refined Pv values 
+
+v.Basis_Pv[0] = 1
+v.Basis_Pv[1] = 4.5
+v.Basis_Pv[2] = 6.5
+
+
+
 # expand per atom in full unit cell
  
 
@@ -303,7 +304,7 @@ else:
     if 'D' in v.refine_mode:
         print("Refining Isotropic Debye Waller Factors, D")
     if 'E' in v.refine_mode:
-        print("Refining Anisotropic Debye Waller Factors, E")
+        print("Refining Anisotropic Uperp and Uparallel, E")
         #raise ValueError("Refinement mode E not implemented")
     if (len(v.atomic_sites) > n_basis):
         raise ValueError("Number of atomic sites to refine is larger than the \
@@ -322,7 +323,151 @@ if 'K' in v.refine_mode:
     print("Refining Pv vales, K")
     
 
+
+
+if "atom_site_b_iso_or_equiv" in cif_dict:
+    v.basis_U_iso = np.array([tup[0] for tup in v.atom_site_b_iso_or_equiv]) / (8 * np.pi**2)
+
+elif "atom_site_u_iso_or_equiv" in cif_dict:
+    v.basis_U_iso = np.array([tup[0] for tup in v.atom_site_u_iso_or_equiv])
+
+else:
+    raise ValueError("No isotropic displacement parameters in CIF")
+
+v.basis_U_iso = np.asarray(v.basis_U_iso)
+
+# --------------------------------
+# 2. Allocate U_ij
+# --------------------------------
+v.U_ij = np.zeros((n_basis, 3, 3))
+
+# --------------------------------
+# 3. Read anisotropic arrays (if present)
+# --------------------------------
+v.has_aniso = np.zeros(n_basis, dtype=bool)  # default: no anisotropic component
+
+if (
+    v.atom_site_aniso_u_11 is not None and
+    v.atom_site_aniso_u_22 is not None and
+    v.atom_site_aniso_u_33 is not None
+):
+    # Convert to set for fast lookup
+    aniso_labels = set(v.atom_site_aniso_label)
+    # Boolean mask for atoms that have anisotropic U
+    v.has_aniso = np.array([label in aniso_labels for label in v.atom_site_label])
+#print(v.has_aniso)
+
+if np.any(v.has_aniso):
+    U11 = np.array([tup[0] for tup in v.atom_site_aniso_u_11])
+    U22 = np.array([tup[0] for tup in v.atom_site_aniso_u_22])
+    U33 = np.array([tup[0] for tup in v.atom_site_aniso_u_33])
+    U12 = np.array([tup[0] for tup in v.atom_site_aniso_u_12])
+    U13 = np.array([tup[0] for tup in v.atom_site_aniso_u_13])
+    U23 = np.array([tup[0] for tup in v.atom_site_aniso_u_23])
+
+#print(v.basis_U_iso)
+# --------------------------------
+# 4. Per-atom assignment (CONTROLLED)
+# --------------------------------
+#print (v.Debye_model)
+aniso_idx = 0
+
+for i in range(n_basis):
+    # Case 1: force isotropic
+    if v.Debye_model == 0:
+        u = v.basis_U_iso[i]
+        v.U_ij[i] = np.diag([u, u, u])
+    
+    # Case 2: allow anisotropic if available
+    elif v.Debye_model == 1 and v.has_aniso[i]:
+        # Fill from U11, U22, ... using a separate index
+        v.U_ij[i] = np.array([
+            [U11[aniso_idx], U12[aniso_idx], U13[aniso_idx]],
+            [U12[aniso_idx], U22[aniso_idx], U23[aniso_idx]],
+            [U13[aniso_idx], U23[aniso_idx], U33[aniso_idx]],
+        ])
+        aniso_idx += 1  # move to next anisotropic atom
+    
+    # Case 3: fallback to isotropic
+    else:
+        u = v.basis_U_iso[i]
+        v.U_ij[i] = np.diag([u, u, u])
+
+
+
+#set initial Uperp and Uparallel initially take iostropic terms and have U_parallel = U_perpendicular U22=U11=U33
+
+# --- Option A: Parallel vs Perpendicular refinement (post-processing / refinement only) ---
+# Can be commented out if you want to keep original CIF tensor
+
+v.U_parallel_param = np.zeros(n_basis)
+v.U_perp_param = np.zeros(n_basis)
+
+#setting isotropic Li , Nb , O
+
+Iso_list =np.array([0.219,0.459,0.541])
+
+Refined_anisos= np.array([[0.00277,0.00277],[0.00332784,0.0056109],[0.00797715,0.0068116]]) #shape(atom,perp/parallel)
+
+
+# convert to U_iso
+Iso_list /= (8*np.pi**2)
+
+for i in range(n_basis):
+    # Extract current tensor
+    U = v.U_ij[i]
+    U[0,1] =0 
+    U[0,2] =0
+    U[1,2] =0
+    # Define U_perp (fixed) and U_parallel (to refine)
+    #U_perp = Iso_list[i]       # average in-plane, could also use isotropic baseline
+    #U_parallel = Iso_list[i]                 # c-axis, refine this only
+    U_perp = Refined_anisos[i][0]
+    U_parallel = Refined_anisos[i][1]
+    # Save for later scaling / plotting
+    v.U_parallel_param[i] = U_parallel
+    v.U_perp_param[i] = U_perp
+    #U_perp = 0
+    #U_parallel = 0
+
+    # Build refined tensor for Option A
+    v.U_ij[i] = np.array([
+        [U_perp, U[0,1], U[0,2]],
+        [U[0,1], U_perp,  U[1,2]],
+        [U[0,2], U[1,2], U_parallel]   # this is the only component we will refine
+    ])
+
+
+
+print("Final U_ij:")
+print(v.U_ij)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # %% read felix.hkl
+
 v.input_hkls, v.i_obs, v.sigma_obs = px.read_hkl_file("felix.hkl")
 v.n_out = len(v.input_hkls)+1  # we expect 000 NOT to be in the hkl list
 
@@ -353,6 +498,7 @@ nullvec = np.array([0, 0, 0])  # null vector for above
 if 'S' not in v.refine_mode:
     v.n_variables = 0
     # count refinement variables
+    '''
     if 'B' in v.refine_mode:  # Atom coordinate refinement
         # the input v.atomic_sites gives the index of the atom in the cif
         for i in range(len(v.atomic_sites)):
@@ -375,6 +521,27 @@ if 'S' not in v.refine_mode:
                 v.refined_variable_type.append(2)  # flag to say it's a coord
                 v.atom_refine_flag.append(v.atomic_sites[i])  # atom index
                 v.atom_refine_vec.append(moves[j, :])  # atom movement
+    '''
+    
+    if 'B' in v.refine_mode:  # Atom coordinate refinement
+        target_atom_idx =2  # refine only this atom
+        i = target_atom_idx
+        # Get allowed movement vectors for this atom
+        moves = px.atom_move(v.space_group_number,
+                             v.basis_wyckoff[v.atomic_sites[i]])
+        degrees_of_freedom = np.sum(np.any(moves, axis=1))
+        if degrees_of_freedom == 0:
+            raise ValueError(f"Coordinate refinement of atom "
+                             f"{v.atomic_sites[i]} not possible")
+        
+        # Add refinement variables only for allowed degrees of freedom
+        for j in range(degrees_of_freedom):
+            v.atom_coord_vec = moves[j, :]  # vector of allowed movement
+            r_dot_v = np.dot(v.basis_atom_position[v.atomic_sites[i]], moves[j, :])
+            v.refined_variable.append(r_dot_v)
+            v.refined_variable_type.append(2)  # coordinate flag
+            v.atom_refine_flag.append(v.atomic_sites[i])  # store atom index
+            v.atom_refine_vec.append(moves[j, :])  # movement vector
 
     if 'C' in v.refine_mode:  # Occupancy
         for i in range(len(v.atomic_sites)):
@@ -392,15 +559,21 @@ if 'S' not in v.refine_mode:
 
     if 'E' in v.refine_mode:  # Anisotropic DW
         for i in range(len(v.atomic_sites)):
-            U = v.aniso_matrix[i]
-            # Extract symmetric independent components
-            aniso_params = [U[0, 0], U[1, 1], U[2, 2], U[0, 1], U[0, 2], U[1, 2]]
-            for u in aniso_params:
-                v.refined_variable.append(u)
+            atom = v.atomic_sites[i]
+            if (i==2):
+                # Append U_parallel first
+                v.refined_variable.append(v.U_parallel_param[i])
+                v.refined_variable_type.append(5)      # anisotropic DW type
+                v.atom_refine_flag.append(i)
+                v.atom_refine_vec.append(nullvec)
+        
+                # Append U_perp second
+                v.refined_variable.append(v.U_perp_param[i])
                 v.refined_variable_type.append(5)
-                v.atom_refine_flag.append(v.atomic_sites[i])
-                v.atom_refine_vec.append(nullvec)  # no atom movement
-                
+                v.atom_refine_flag.append(i)
+                v.atom_refine_vec.append(nullvec) 
+    
+          
         
 
     if 'F' in v.refine_mode:  # Lattice parameters
@@ -564,6 +737,10 @@ if 'S' not in v.refine_mode:
             if 'dm3' in dirname.lower() and x_str in dirname:
                 # Return the full path of the matching folder
                 dm3_folder = os.path.join(dirpath, dirname)
+                
+    #dm3_folder = 'DM3_100x100' #diamond
+    dm3_folder = 'DM3_84x84'  #Lithium Niobate
+    
     if dm3_folder is not None:
         dm3_files = [file for file in os.listdir(dm3_folder)
                      if file.lower().endswith('.dm3')]
@@ -602,9 +779,31 @@ if 'S' not in v.refine_mode:
         plt.show()
         # initialise correlation
         best_corr = np.ones(v.n_out)
-
+        
+        
+#convert to tif for analysis in fiji
+        '''
+        dm3_folder = "DM3_100x100"
+        tif_folder = "dm3_tif_diamond100"
+        
+        os.makedirs(tif_folder, exist_ok=True)
+        
+        for file_name in os.listdir(dm3_folder):
+            if file_name.endswith(".dm3"):
+                file_path = os.path.join(dm3_folder, file_name)
+                img = px.read_dm3(file_path, 2*v.image_radius, debug=False)  # 2D array
+                out_name = os.path.join(tif_folder, file_name.replace(".dm3", ".tif"))
+                imageio.imwrite(out_name, img.astype('float64'))  # save as float T       
+        
+'''
 
 # %% output - *** needs work, apply blur/find best blur 
+
+
+
+sim.save_LACBED(v)
+
+
 if v.image_processing == 1:
     print(f"  Blur radius {v.blur_radius} pixels")
 if 'S' in v.refine_mode:

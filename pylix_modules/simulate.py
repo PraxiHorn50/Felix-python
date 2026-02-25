@@ -9,6 +9,7 @@ Each of which call further pylix subroutines
 Returns the simulated LACBED patterns
 
 """
+import imageio.v2 as imageio
 import re
 import numpy as np
 from scipy.constants import c, h, e, m_e, angstrom
@@ -53,13 +54,13 @@ def simulate(v):
     # fill the unit cell and get mean inner potential
     # when iterating we only do it if necessary?
     # if v.iter_count == 0 or v.current_variable_type < 6:
-    #print (v.atom_site_type_symbol)
+  
     
-    atom_position, atom_label,atom_type, atom_name, B_iso, occupancy, unique_aniso_matrixes,pv,kappas = \
+    atom_position, atom_label,atom_type, atom_name, u_ij, occupancy, pv,kappas = \
         px.unique_atom_positions(
             v.symmetry_matrix, v.symmetry_vector, v.basis_atom_label,v.atom_site_type_symbol,
             v.basis_atom_name,
-            v.basis_atom_position, v.basis_B_iso, v.basis_occupancy, v.aniso_matrix,v.Basis_Pv,v.Basis_Kappa)
+            v.basis_atom_position ,v.U_ij, v.basis_occupancy,v.Basis_Pv,v.Basis_Kappa)
     
     # Generate atomic numbers based on the elemental symbols
     atomic_number = np.array([fu.atomic_number_map[na] for na in atom_name])
@@ -73,12 +74,15 @@ def simulate(v):
    
    
     
-    print(v.Basis_Kappa)
+    print("kappa:",v.Basis_Kappa)
   
     print(v.Basis_Pv)
-    
-    
-    
+   # print(atom_name)
+    '''
+    print("parallel U:", v.U_parallel_param)
+    print("perpendicular U:",v.U_perp_param)
+   
+    '''
     
    
     
@@ -128,10 +132,10 @@ def simulate(v):
     # ===============================================
     # set up reference frames
     a_vec_m, b_vec_m, c_vec_m, ar_vec_m, br_vec_m, cr_vec_m, norm_dir_m, t_mat_o2m, t_mat_c2o = \
-        px.reference_frames(v.debug, v.cell_a, v.cell_b, v.cell_c,
+        px.reference_frames( v.cell_a, v.cell_b, v.cell_c,
                             v.cell_alpha, v.cell_beta, v.cell_gamma,
                             v.space_group, v.x_direction,
-                            v.incident_beam_direction, v.normal_direction)
+                            v.incident_beam_direction, v.normal_direction,v.debug)
     # put the crystal in the micrcoscope reference frame, in Å
     atom_coordinate = (atom_position[:, 0, np.newaxis] * a_vec_m +
                        atom_position[:, 1, np.newaxis] * b_vec_m +
@@ -246,12 +250,12 @@ def simulate(v):
 
     # now make the Ug matrix, i.e. calculate the structure factor Fg for all
     # g-vectors in g_matrix and convert using the above factor
-    ug_matrix = Fg_to_Ug * px.Fg_matrix(n_hkl, v.scatter_factor_method,
+    ug_matrix = Fg_to_Ug * px.Fg_matrix(n_hkl, v.scatter_factor_method,v.basis_atom_label,atom_label,
                                         n_atoms, atom_coordinate,
                                         atomic_number, occupancy,
-                                        B_iso, g_matrix, g_magnitude,
+                                        g_matrix, g_magnitude,
                                         v.absorption_method, v.absorption_per,
-                                        electron_velocity, g_pool, unique_aniso_matrixes,kappas,pv,v.Debye_model,v.model_flag)
+                                        electron_velocity, g_pool, u_ij,kappas,pv,v.Debye_model,v.model_flag)
     # matrix of dot products with the surface normal
     g_dot_norm = np.dot(g_pool, norm_dir_m)
     if v.iter_count == 0:
@@ -307,9 +311,17 @@ def simulate(v):
     print(f"\rBloch wave calculation... done in {bwc:.1f} s (beam pool setup {setup:.1f} s)")
     if v.iter_count == 0: 
         print(f"    {1000*(bwc)/(4*v.image_radius**2):.2f} ms/pixel")
+        
+    '''
 
     # increment iteration counter
     v.iter_count += 1
+    reflections = [(0,0,6), (1,1,0), (0,0,-6)]
+    filename = "lacbedrow_kappa_1.5.pdf"
+    #save_LACBED_row_from_reflections(v, reflections, j=0, save_path=filename)
+    '''
+    #save_LACBED(v)
+    #save_LACBED_aligned(v, v.lacbed_expt)
 
     return
 
@@ -362,6 +374,47 @@ def pcc(stack1, stack2):
     return pcc  # , shifts
 
 
+
+
+def r_factor(stack1, stack2):
+    """
+    Compute normalized R-factor between two stacks of images.
+
+    Input:
+        stack1, stack2: sets of n images, shape [pix_x, pix_y, n]
+                        or 2D single image [pix_x, pix_y]
+    Output:
+        numpy array of length n, giving R-factor for each image pair
+        R = 0 -> perfect match, higher R -> worse fit
+    """
+    if stack1.ndim == 2:
+        stack1 = stack1[:, :, np.newaxis]
+        stack2 = stack2[:, :, np.newaxis]
+
+    n = stack1.shape[2]
+    rvals = np.zeros(n)
+    shifts = np.zeros((n, 2))
+
+    for i in range(n):
+        img1 = stack1[:, :, i]
+        img2 = stack2[:, :, i]
+
+        # Estimate sub-pixel shift
+        up = 10  # shifts accurate to 1/upsample_factor
+        shift, error, diffphase = phase_cross_correlation(img1, img2,
+                                                          upsample_factor=up)
+        shifts[i] = shift
+
+        # Shift img2 in Fourier space
+        img2_shifted = np.real(ifftn(fourier_shift(fftn(img2), shift)))
+
+        # Compute normalized R-factor
+        numerator = np.sum(np.abs(img1 - img2_shifted))
+        denominator = np.sum(np.abs(img1)) + 1e-12  # avoid division by zero
+        rvals[i] = numerator / denominator
+
+    return rvals  # , shifts
+
 def figure_of_merit(v):
     """ needs fleshing out with image processing & correlation options
     takes as an input v.lacbed_sim, shape [v.n_thickness, pix_x, pix_y, n_out]
@@ -397,8 +450,9 @@ def figure_of_merit(v):
                 for j in range(n_out):
                     blacbed[:, :, j] = gaussian_filter(blacbed[:, :, j],
                                                        sigma=r)
-                # b_fom.append(np.mean(1.0 - zncc(v.lacbed_expt, blacbed)))
-                b_fom.append(np.mean(1.0 - pcc(v.lacbed_expt, blacbed)))
+                #b_fom.append(np.mean(1.0 - zncc(v.lacbed_expt, blacbed)))
+                #b_fom.append(np.mean(1.0 - pcc(v.lacbed_expt, blacbed)))
+                b_fom.append(np.mean(1.0 - r_factor(v.lacbed_expt, blacbed)))
             if v.plot:
                 plt.plot(radii, b_fom)
             v.blur_radius = radii[np.argmin(b_fom)]
@@ -406,7 +460,7 @@ def figure_of_merit(v):
             for j in range(n_out):
                 v.lacbed_sim[i, :, :, j] = gaussian_filter(v.lacbed_sim[i, :, :, j],
                                                            sigma=v.blur_radius)
-        # fom_array[i, :] = 1.0 - zncc(v.lacbed_expt, v.lacbed_sim[i, :, :, :])
+        #fom_array[i, :] = 1.0 - zncc(v.lacbed_expt, v.lacbed_sim[i, :, :, :])
         fom_array[i, :] = 1.0 - pcc(v.lacbed_expt, v.lacbed_sim[i, :, :, :])
     if v.plot and v.image_processing == 2:
         plt.show()
@@ -499,47 +553,22 @@ def update_variables(v):
         
         
         
-        elif variable_type == 5:
-            
-            
-            # Aniso Debye-Waller factor (implemented)
-            
-             
-             U = v.aniso_matrix[v.atom_refine_flag[i]]
-             if   0 < U[0,0] < 0.1:
-                 U[0,0]= v.refined_variable[i]*1.0
-             else:
-                 U[0,0]=0
-             if   0 < U[1,1] < 0.1:
-                  U[1,1]= v.refined_variable[i]*1.0
-             else:
-                  U[1,1]=0
-             if   0 < U[2,2] < 0.1:
-                  U[2,2]= v.refined_variable[i]*1.0
-             else:
-                  U[2,2]=0
-             if   0 < U[0,1] < 0.1:
-                  U[0,1]= U[1,0] = v.refined_variable[i]*1.0
-             else:
-                  U[0,1]= U[1,0]= 0
-             
-             
-             if   0 < U[0,2] < 0.1:
-                 U[0,2]= U[2,0]= v.refined_variable[i]*1.0
-             else:
-                 U[0,2]= U[2,0]= 0
-            
-             
-             if   0 < U[1,2] < 0.1:
-                  U[1,2]= U[1,2]= v.refined_variable[i]*1.0
-             else:
-                  U[1,2]= U[2,1]=0
-                  
-                 
-                 
-                
-             v.aniso_matrix[v.atom_refine_flag[i]] = U
-
+        elif variable_type == 5:  # Anisotropic Debye-Waller
+            atom_idx = v.atom_refine_flag[i]   # now an int (e.g. 1)
+            U = v.U_ij[atom_idx]
+        
+            value = max(0.0, v.refined_variable[i])
+        
+            # Decide whether this entry is parallel or perpendicular
+            # Convention: even = parallel, odd = perpendicular
+            if i % 2 == 0:
+                v.U_parallel_param[atom_idx] = value
+                U[2,2] = value
+            else:
+                v.U_perp_param[atom_idx] = value
+                U[0,0] = U[1,1] = value
+        
+            v.U_ij[atom_idx] = U
        
         elif variable_type == 6:
             # Lattice parameters a, b, c
@@ -581,10 +610,10 @@ def update_variables(v):
            
             #refining Pv values in basis 
         elif variable_type == 11:
-           if v.refined_variable[i]*0.5 < v.refined_variable[i] < v.refined_variable[i]*1.5:  # must lie in a reasonable range
-                v.Basis_Pv[v.atom_refine_flag[i]] = v.refined_variable[i]*1.0
-           else: 
-                v.Basis_Pv[v.atom_refine_flag[i]] = 0.0
+           #if v.refined_variable[i]*0.5 < v.refined_variable[i] < v.refined_variable[i]*1.5:  # must lie in a reasonable range
+           v.Basis_Pv[v.atom_refine_flag[i]] = v.refined_variable[i]*1.0
+          # else: 
+           #     v.Basis_Pv[v.atom_refine_flag[i]] = 0.0
                #v.Basis_Pv[v.atom_refine_flag[i]] = np.clip(v.refined_variable[i], ,1.5 )
             
         
@@ -623,7 +652,8 @@ def print_LACBED(v):
             plt.tight_layout()
             plt.show()
     else:
-        j = v.best_t
+        #j = v.best_t
+        j=0
         fig, axes = plt.subplots(w, h, figsize=(w*5, h*5))
         text_effect = withStroke(linewidth=3, foreground='black')
         axes = axes.flatten()
@@ -652,24 +682,109 @@ def print_LACBED_pattern(i, j, v):
                      size=30, color='w', path_effects=[text_effect])
 
 
+
+
 def save_LACBED(v):
     '''
-    Saves all LACBED patterns in .npy and .png format
+    Saves all LACBED patterns in .bin (raw) and .tif (Fiji-friendly) format
     '''
-    j = v.best_t
+
+   
+
+
+    height = v.lacbed_sim.shape[1]
+    width  = v.lacbed_sim.shape[2]
+    dtype  = v.lacbed_sim.dtype
+
+    print("Saving LACBED:")
+    print("  height =", height)
+    print("  width  =", width)
+    print("  dtype  =", dtype)
+
+    j = 0  # time index (or v.best_t if you want)
 
     if not os.path.isdir(v.chemical_formula_sum):
         os.mkdir(v.chemical_formula_sum)
+
     os.chdir(v.chemical_formula_sum)
+
     for i in range(v.lacbed_sim.shape[3]):
         signed_str = "".join(f"{x:+d}" for x in v.hkl[v.g_output[i], :])
-        fname = f"{v.chemical_formula_sum}_{signed_str}.bin"
-        v.lacbed_sim[j, :, :, i].tofile(fname)
-        fname = f"{v.chemical_formula_sum}_{signed_str}.png"
-        plt.imsave(fname, v.lacbed_sim[2, :, :, i], cmap='gray')
+
+        img = v.lacbed_sim[j, :, :, i].astype(np.float32)
+
+        # --- RAW BINARY (unchanged, for reproducibility) ---
+        bin_name = f"kappa_{v.chemical_formula_sum}_{signed_str}.bin"
+        img.tofile(bin_name)
+
+        # --- TIFF (for Fiji) ---
+        tif_name = f"ChargePvRF{v.chemical_formula_sum}_{signed_str}.tif"
+        imageio.imwrite(tif_name, img)
+
     os.chdir("..")
 
 
+
+
+
+def save_LACBED_aligned(v, exp_stack):
+    '''
+    Aligns simulated LACBED patterns to experimental stack
+    before saving as .bin and .tif
+    exp_stack shape: [pix_x, pix_y, n_reflections]
+    '''
+
+    height = v.lacbed_sim.shape[1]
+    width  = v.lacbed_sim.shape[2]
+    dtype  = v.lacbed_sim.dtype
+
+    print("Saving LACBED (aligned):")
+    print("  height =", height)
+    print("  width  =", width)
+    print("  dtype  =", dtype)
+
+    j = 0  # time index
+
+    if not os.path.isdir(v.chemical_formula_sum):
+        os.mkdir(v.chemical_formula_sum)
+
+    os.chdir(v.chemical_formula_sum)
+
+    for i in range(v.lacbed_sim.shape[3]):
+
+        signed_str = "".join(f"{x:+d}" for x in v.hkl[v.g_output[i], :])
+
+        sim_img = v.lacbed_sim[j, :, :, i].astype(np.float32)
+        exp_img = exp_stack[:, :, i].astype(np.float32)
+        exp_norm = (exp_img - np.mean(exp_img)) / (np.std(exp_img) + 1e-8)
+        sim_norm = (sim_img - np.mean(sim_img)) / (np.std(sim_img) + 1e-8)
+
+        # --- Estimate subpixel shift ---
+        shift, error, diffphase = phase_cross_correlation(
+            exp_norm, sim_norm, upsample_factor=10
+        )
+        print(shift)
+        print("Reflection:", signed_str)
+        print("  shift =", shift)
+        print("  error =", error)
+        print("  norm  =", np.linalg.norm(shift))
+        print()
+
+        # --- Apply Fourier shift ---
+        sim_aligned = np.real(ifftn(fourier_shift(fftn(sim_img), shift)))
+
+        # --- Save RAW ---
+        bin_name = f"kappa_{v.chemical_formula_sum}_{signed_str}.bin"
+        sim_aligned.astype(np.float32).tofile(bin_name)
+
+        # --- Save TIFF ---
+        tif_name = f"kappa1_{v.chemical_formula_sum}_{signed_str}.tif"
+        imageio.imwrite(tif_name, sim_aligned.astype(np.float32))
+
+    os.chdir("..")
+
+
+	
 def print_current_var(v, i):
     # prints the variable being refined
     var = v.refined_variable[i]

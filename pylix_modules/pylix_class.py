@@ -84,13 +84,16 @@ class Cif:
         self.atom_site_occupancy = None
         self.atom_site_u_iso_or_equiv = None
         self.atom_site_wyckoff_symbol = None
+        self.basis_U_iso = None
         self.atom_site_aniso_u_11 = None
         self.atom_site_aniso_u_22 = None
         self.atom_site_aniso_u_33 = None
         self.atom_site_aniso_u_12 = None
         self.atom_site_aniso_u_13 = None
         self.atom_site_aniso_u_23 = None
-        self.U_matrix_Aniso = None
+        self.U_parallel_param = None
+        self.U_perp_param = None
+        self.U_ij = None
         self.Basis_Kappa = None
         self.Basis_Pv = None
         
